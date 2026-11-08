@@ -4,11 +4,14 @@ import { api } from "../lib/api";
 import { loadDatasets, state } from "../store";
 import S3Picker from "./S3Picker.vue";
 import PortalPicker from "./PortalPicker.vue";
+import DiscoverView from "./DiscoverView.vue";
+import RecommendedDatasets from "./RecommendedDatasets.vue";
 
 const busy = ref(false);
 const error = ref("");
 const showS3 = ref(false);
 const showPortal = ref(false);
+const showDiscover = ref(false);
 
 async function run(fn: () => Promise<void>) {
   busy.value = true;
@@ -76,6 +79,20 @@ async function openFolder() {
         <div class="card-title">🌍 Quantms portal</div>
         <div class="card-desc">Open a reanalysed dataset from the public quantms portal over HTTPS.</div>
       </button>
+
+      <button class="card" @click="showDiscover = !showDiscover" :disabled="busy">
+        <div class="card-title">🔎 Discover quantms data</div>
+        <div class="card-desc">Search and filter datasets by text, organism, instrument or collection to find interesting QPX files.</div>
+      </button>
+
+      <div class="card info">
+        <div class="card-title">🔬 What is QPX?</div>
+        <div class="card-desc">
+          An open quantitative-proteomics format: a folder of
+          <span class="mono">&lt;prefix&gt;.&lt;view&gt;.parquet</span> views (peptides, proteins,
+          PSMs, …) queryable in place — no database needed.
+        </div>
+      </div>
     </div>
 
     <div class="err" v-if="error">⚠ {{ error }}</div>
@@ -84,6 +101,9 @@ async function openFolder() {
 
     <S3Picker v-if="showS3" style="margin-top: 20px" />
     <PortalPicker v-if="showPortal" style="margin-top: 20px" />
+    <DiscoverView v-if="showDiscover" style="margin-top: 20px" />
+
+    <RecommendedDatasets v-if="!showS3 && !showPortal && !showDiscover" />
   </div>
 </template>
 
@@ -92,29 +112,45 @@ async function openFolder() {
   max-width: 1680px;
   margin: 0 auto;
   padding: 28px 32px;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 h2 {
   margin: 0 0 6px;
 }
 .grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: minmax(112px, auto);
   gap: 14px;
   margin-top: 20px;
+  flex: 0 0 auto;
 }
 @media (max-width: 900px) {
   .grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+@media (max-width: 560px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
 .card {
   text-align: left;
   padding: 16px 18px;
-  min-height: 92px;
+  min-height: 112px;
   background: var(--bg-soft);
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.card.info {
+  cursor: default;
+}
+.card.info .card-desc {
+  line-height: 1.5;
 }
 .card-title {
   font-weight: 700;

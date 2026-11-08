@@ -229,6 +229,27 @@ Click a view in the sidebar to work with its rows directly:
 - **Portal**: the proxy follows the portal's redirect to a short-lived signed storage URL, and gets
   a new one when it expires.
 
+Portal HTTPS requests use the operating system's certificate verifier and trust store, including
+system-provided intermediates on macOS and Windows. If your company installs its CA in the system
+store, no extra configuration should be needed.
+
+Alternatively, set `SSL_CERT_FILE` to a PEM certificate bundle and/or `SSL_CERT_DIR` to directories
+of PEM certificates before starting qpxui. As in uv, non-empty settings replace the default trust
+source: include every CA needed for portal and storage hosts. Separate multiple directories with
+`:` on Unix or `;` on Windows. Configured paths that cannot be read, or configured sources that
+collectively contain no certificates, cause an error rather than falling back to system trust.
+
+```bash
+SSL_CERT_FILE=/path/to/ca-bundle.pem qpxui
+```
+
+On macOS, launch the executable directly (for example,
+`SSL_CERT_FILE=/path/to/ca-bundle.pem /Applications/qpxui.app/Contents/MacOS/qpxui`);
+on Windows PowerShell, set `$env:SSL_CERT_FILE` before launching the executable.
+Only use certificates from a trusted source. Restart the app after changing the configuration.
+These settings apply to portal registry, listing, downloads and streaming; the separate S3 client
+may handle certificate configuration differently. HTTPS certificate verification remains enabled.
+
 **Download to cache** instead fetches whole files once (with progress and cancel), for fully
 offline use. Cached files are kept in the OS cache folder (`~/Library/Caches/qpxui/` on macOS,
 `~/.cache/qpxui/` on Linux, `%LOCALAPPDATA%\qpxui\` on Windows).
@@ -259,7 +280,7 @@ with small row groups (`qpxc transform relayout`) let each lookup read a few MB.
 - Tauri system dependencies:
   - macOS: Xcode Command Line Tools (`xcode-select --install`);
   - Windows: [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) and MSVC build tools;
-  - Linux: `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`
+  - Linux: `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libssl-dev patchelf`
     (see the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)).
 
 **Run and build**

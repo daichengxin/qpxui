@@ -42,12 +42,18 @@ log = "0.4"
 env_logger = "0.11"
 
 # HTTP client for the public quantms portal (browse.quantms.org) example source.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "rustls-tls", "json", "stream"] }
+rustls-native-certs = "0.8.5"
 
 # Free disk space on the cache volume, checked before big downloads.
 fs4 = "0.13"
 
 [dev-dependencies]
+rcgen = "0.13"
+tempfile = "3"
+# ring provider only (no aws-lc-rs) so the TLS test doesn't drag in cmake/nasm on CI.
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [profile.release]
 panic = "abort"

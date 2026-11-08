@@ -25,8 +25,12 @@ pub fn run() {
             commands::transfers::cache_free_space,
             commands::portal::portal_datasets,
             commands::portal::portal_registry,
+            commands::portal::portal_search,
+            commands::portal::portal_facets,
             commands::portal::portal_list_views,
             commands::portal::portal_cache_views,
+            commands::peptide_search::ps_search,
+            commands::peptide_search::ps_modifications,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

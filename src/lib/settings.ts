@@ -43,7 +43,7 @@ export interface SettingsState {
 }
 
 function defaults(): SettingsState {
-  return { theme: "dark", ptmColors: {} };
+  return { theme: "light", ptmColors: {} };
 }
 
 function load(): SettingsState {

@@ -15,6 +15,7 @@
 //! URLs carry a random per-session token so other local processes can't use
 //! the proxy to read the user's buckets.
 
+use crate::commands::portal_http;
 use crate::commands::s3::client_for_bucket;
 use aws_sdk_s3::Client;
 use bytes::Bytes;
@@ -253,15 +254,40 @@ async fn resolve(client: &reqwest::Client, url: &str) -> Result<String, String> 
     Err(format!("resolve {url}: HTTP {}", resp.status()))
 }
 
-/// One ranged GET against an HTTP source; retries once with a freshly resolved
-/// URL if the signed one was rejected (expired).
+/// Transient HTTP statuses worth retrying a range fetch for. 5xx are server
+/// hiccups, 429/408/425 are throttling / timeout — all likely to clear on retry.
+fn is_transient_status(st: u16) -> bool {
+    matches!(st, 408 | 425 | 429 | 500 | 502 | 503 | 504)
+}
+
+/// Short backoff between retries: ~250 ms then ~500 ms. Long enough for the
+/// upstream to clear a transient 502/503, short enough not to stall the query.
+fn backoff_delay(attempt: usize) -> std::time::Duration {
+    std::time::Duration::from_millis(match attempt {
+        0 => 250,
+        _ => 500,
+    })
+}
+
+/// One ranged GET against an HTTP source, with bounded retries.
+///
+/// Two failure modes are handled separately:
+///   * the signed URL was rejected/expired (400/401/403) -> re-resolve it and
+///     try again;
+///   * a transient failure (network/send error, or 408/425/429/5xx such as a
+///     remote gateway 502) -> retry with a short backoff, up to a couple of
+///     attempts, before giving up.
+#[allow(clippy::too_many_arguments)]
 async fn http_range(
     client: &reqwest::Client,
     url: &str,
     resolved: &Mutex<Option<String>>,
     range: &str,
 ) -> Result<reqwest::Response, String> {
-    for attempt in 0..2 {
+    const MAX_ATTEMPTS: usize = 3; // initial + 2 retries
+    let mut last_err: Option<String> = None;
+    for attempt in 0..MAX_ATTEMPTS {
+        // Use the cached signed URL on the first try, otherwise resolve fresh.
         let cached = resolved.lock().unwrap().clone();
         let target = match cached {
             Some(u) if attempt == 0 => u,
@@ -271,23 +297,45 @@ async fn http_range(
                 u
             }
         };
-        let resp = client
+
+        let send = client
             .get(&target)
             .header(header::RANGE.as_str(), range)
             .send()
-            .await
-            .map_err(|e| format!("range get {url}: {e}"))?;
+            .await;
+
+        let resp = match send {
+            Ok(r) => r,
+            Err(e) => {
+                // Transport-level failure (timeout / connection reset): transient.
+                if attempt + 1 < MAX_ATTEMPTS {
+                    last_err = Some(format!("range get {url}: {e}"));
+                    tokio::time::sleep(backoff_delay(attempt)).await;
+                    continue;
+                }
+                return Err(format!("range get {url}: {e} after {MAX_ATTEMPTS} attempts"));
+            }
+        };
+
         let st = resp.status().as_u16();
+        // Expired / rejected signed URL: drop the cached URL and resolve fresh.
         if (st == 403 || st == 400 || st == 401) && attempt == 0 {
             *resolved.lock().unwrap() = None;
             continue;
         }
-        if !resp.status().is_success() {
-            return Err(format!("range get {url}: HTTP {st}"));
+        if resp.status().is_success() {
+            return Ok(resp);
         }
-        return Ok(resp);
+        // Not successful: retry transient statuses, but fail fast on permanent
+        // client errors (e.g. 404) that retrying will never fix.
+        if is_transient_status(st) && attempt + 1 < MAX_ATTEMPTS {
+            last_err = Some(format!("range get {url}: HTTP {st}"));
+            tokio::time::sleep(backoff_delay(attempt)).await;
+            continue;
+        }
+        return Err(format!("range get {url}: HTTP {st}"));
     }
-    Err(format!("range get {url}: signed URL rejected"))
+    Err(last_err.unwrap_or_else(|| format!("range get {url}: signed URL rejected")))
 }
 
 /// Fetch one inclusive byte range from the object's source.
@@ -483,10 +531,10 @@ pub async fn register(bucket: &str, paths: &[String]) -> Result<BTreeMap<String,
 /// 1-byte range GET is made per file, to learn its size; data is fetched lazily.
 pub async fn register_http(urls: &[String]) -> Result<BTreeMap<String, StreamHandle>, String> {
     let p = proxy().await?;
-    let client = reqwest::Client::builder()
+    let client = portal_http::client_builder()?
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("portal HTTP client: {e:?}"))?;
     let mut out = BTreeMap::new();
     for url in urls {
         // Only the quantms portal: the proxy must not fetch arbitrary hosts.

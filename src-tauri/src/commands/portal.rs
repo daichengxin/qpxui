@@ -11,6 +11,7 @@
 //! These files are freely downloadable over HTTPS (no AWS credentials needed),
 //! so this module provides the app with a ready-made example source to open.
 
+use crate::commands::portal_http;
 use crate::commands::progress;
 use crate::commands::transfers as xfers;
 use crate::qpx::ViewInfo;
@@ -103,7 +104,7 @@ fn cache_root() -> Result<PathBuf, String> {
 }
 
 async fn get_html(url: &str) -> Result<String, String> {
-    let client = Client::builder().build().map_err(|e| e.to_string())?;
+    let client = portal_http::client_builder()?.build().map_err(|e| format!("portal HTTP client: {e:?}"))?;
     let resp = client
         .get(url)
         .header("Accept", "text/html")
@@ -266,6 +267,30 @@ pub struct PortalDataset {
     pub px_url: Option<String>,
     #[serde(default, rename(deserialize = "collection_title", serialize = "collectionTitle"))]
     pub collection_title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub keywords: Option<Vec<String>>,
+    #[serde(default)]
+    pub diseases: Option<Vec<String>>,
+    #[serde(default)]
+    pub tissues: Option<Vec<String>>,
+    #[serde(default)]
+    pub publication: Option<Publication>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub count: Option<u64>,
+    #[serde(default)]
+    pub collection: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct Publication {
+    #[serde(default)]
+    pub doi: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -282,7 +307,7 @@ struct DatasetSearchPage {
 #[tauri::command]
 pub async fn portal_registry(page_size: Option<usize>) -> Result<Vec<PortalDataset>, String> {
     let page_size = page_size.unwrap_or(50).clamp(1, 100);
-    let client = Client::builder().build().map_err(|e| e.to_string())?;
+    let client = portal_http::client_builder()?.build().map_err(|e| format!("portal HTTP client: {e:?}"))?;
 
     async fn get_page(
         client: &Client,
@@ -298,7 +323,7 @@ pub async fn portal_registry(page_size: Option<usize>) -> Result<Vec<PortalDatas
                     },
                     Err(e) => last = format!("http: {e}"),
                 },
-                Err(e) => last = format!("request: {e}"),
+                Err(e) => last = format!("request: {e:?}"),
             }
         }
         Err(format!("{url}: {last}"))
@@ -325,6 +350,166 @@ pub async fn portal_registry(page_size: Option<usize>) -> Result<Vec<PortalDatas
     all.sort_by(|a, b| a.accession.cmp(&b.accession).then_with(|| key(a).cmp(&key(b))));
     all.dedup_by(|a, b| key(a) == key(b));
     Ok(all)
+}
+
+/// One page of search results from the quantms portal dataset catalogue.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortalSearchResult {
+    pub datasets: Vec<PortalDataset>,
+    #[serde(default)]
+    pub total: usize,
+    #[serde(default)]
+    pub page: usize,
+    #[serde(default, rename(serialize = "totalPages"))]
+    pub total_pages: usize,
+    #[serde(default)]
+    pub sort: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SearchPageRaw {
+    #[serde(default)]
+    datasets: Vec<PortalDataset>,
+    #[serde(default)]
+    total: usize,
+    #[serde(default)]
+    page: usize,
+    #[serde(default, rename = "total_pages")]
+    total_pages: usize,
+    #[serde(default)]
+    sort: String,
+}
+
+/// Facet options shown in the discover UI. Organisms and instruments come from
+/// `/facets`, collections from `/collections` (name + title + dataset count).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortalFacets {
+    pub organisms: Vec<String>,
+    pub instruments: Vec<String>,
+    pub collections: Vec<CollectionOption>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionOption {
+    pub name: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default, rename(deserialize = "dataset_count", serialize = "datasetCount"))]
+    pub dataset_count: usize,
+}
+
+/// Server-side search over the quantms portal dataset catalogue. Only the
+/// filters the registry API actually supports are forwarded (`q`, collection,
+/// organism, instrument, sort); count/lower-bound filters are not available
+/// server-side, so the caller combines this with client-side sorting if needed.
+#[tauri::command]
+pub async fn portal_search(
+    query: Option<String>,
+    collection: Option<String>,
+    organism: Option<String>,
+    instrument: Option<String>,
+    sort: Option<String>,
+    page: Option<usize>,
+    page_size: Option<usize>,
+) -> Result<PortalSearchResult, String> {
+    let client = portal_http::client_builder()?.build().map_err(|e| format!("portal HTTP client: {e:?}"))?;
+
+    let mut url = reqwest::Url::parse("https://api.quantms.org/dataset-search/datasets")
+        .map_err(|e| format!("bad search URL: {e}"))?;
+    {
+        let mut qp = url.query_pairs_mut();
+        let mut add = |param: &str, value: Option<&str>| {
+            if let Some(v) = value.filter(|v| !v.trim().is_empty()) {
+                qp.append_pair(param, v);
+            }
+        };
+        add("q", query.as_deref());
+        add("collection", collection.as_deref());
+        add("organism", organism.as_deref());
+        add("instrument", instrument.as_deref());
+        add("sort", sort.as_deref());
+        qp.append_pair("page", &page.unwrap_or(1).max(1).to_string());
+        qp.append_pair("page_size", &page_size.unwrap_or(50).clamp(1, 100).to_string());
+    }
+
+    let raw = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(|e| format!("request: {e:?}"))?
+        .error_for_status()
+        .map_err(|e| format!("http: {e}"))?
+        .json::<SearchPageRaw>()
+        .await
+        .map_err(|e| format!("parse: {e}"))?;
+
+    Ok(PortalSearchResult {
+        datasets: raw.datasets,
+        total: raw.total,
+        page: raw.page,
+        total_pages: raw.total_pages.max(1),
+        sort: raw.sort,
+    })
+}
+
+/// Facet options (organisms, instruments, collections) for the discover UI.
+#[tauri::command]
+pub async fn portal_facets() -> Result<PortalFacets, String> {
+    let client = portal_http::client_builder()?.build().map_err(|e| format!("portal HTTP client: {e:?}"))?;
+
+    async fn get_json(client: &Client, url: &str) -> Result<serde_json::Value, String> {
+        let mut last = "no attempt".to_string();
+        for _ in 0..3 {
+            match client.get(url).send().await {
+                Ok(resp) => match resp.error_for_status() {
+                    Ok(resp) => match resp.json::<serde_json::Value>().await {
+                        Ok(v) => return Ok(v),
+                        Err(e) => last = format!("parse: {e}"),
+                    },
+                    Err(e) => last = format!("http: {e}"),
+                },
+                Err(e) => last = format!("request: {e:?}"),
+            }
+        }
+        Err(format!("{url}: {last}"))
+    }
+
+    let values = |raw: &serde_json::Value, bucket: &str| -> Vec<String> {
+        raw.get(bucket)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|f| f.get("value").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let fac = get_json(&client, "https://api.quantms.org/dataset-search/facets").await?;
+    let mut organisms = values(&fac, "organism");
+    let mut instruments = values(&fac, "instrument");
+    organisms.sort();
+    instruments.sort();
+
+    #[derive(serde::Deserialize)]
+    struct CollectionsRaw {
+        #[serde(default)]
+        collections: Vec<CollectionOption>,
+    }
+    let colls: CollectionsRaw = serde_json::from_value(
+        get_json(&client, "https://api.quantms.org/dataset-search/collections").await?,
+    )
+    .map_err(|e| format!("collections: {e}"))?;
+
+    Ok(PortalFacets {
+        organisms,
+        instruments,
+        collections: colls.collections,
+    })
 }
 
 /// Resolve the `qpx/` folder URL (or the run folder directly) for a dataset,
@@ -491,7 +676,7 @@ async fn pick_run(
     if runs.len() == 1 {
         return Ok(runs[0].clone());
     }
-    let client = Client::builder().build().map_err(|e| e.to_string())?;
+    let client = portal_http::client_builder()?.build().map_err(|e| format!("portal HTTP client: {e:?}"))?;
     let fetches = runs.into_iter().map(|run| {
         let client = client.clone();
         let url = format!("{ds_url}{run}/provenance.json");
@@ -523,7 +708,7 @@ async fn portal_cache_views_impl(
     cancel_id: String,
     urls: Vec<String>,
 ) -> Result<Vec<ViewInfo>, String> {
-    let client = Client::builder().build().map_err(|e| e.to_string())?;
+    let client = portal_http::client_builder()?.build().map_err(|e| format!("portal HTTP client: {e:?}"))?;
     let root = cache_root()?;
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
 
@@ -895,4 +1080,3 @@ mod tests {
         assert!(views.iter().any(|v| v.size_bytes > 0));
     }
 }
-

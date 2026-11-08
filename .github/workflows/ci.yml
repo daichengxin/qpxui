@@ -36,7 +36,7 @@ jobs:
         # (libwebkit2gtk); fail fast on a stalled download and retry.
         run: |
           APT="-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
-          PKGS="libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf"
+          PKGS="libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libssl-dev patchelf"
           # Only the download is time-limited: killing dpkg mid-install would break the retries.
           for i in 1 2 3; do
             sudo apt-get $APT update &&
@@ -52,4 +52,6 @@ jobs:
       # tauri::generate_context! needs the frontend dist folder to exist.
       - run: mkdir -p dist
       - run: cargo check
+        working-directory: src-tauri
+      - run: cargo test --lib commands::portal_http::tests
         working-directory: src-tauri
